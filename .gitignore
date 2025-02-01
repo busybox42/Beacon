@@ -1,0 +1,31 @@
+# Rust build directory
+/target/
+
+# Remove Cargo.lock for libraries
+# Cargo.lock
+
+# Backup files
+**/*.rs.bk
+*.swp
+*.swo
+
+# IDE specific files
+.vscode/
+.idea/
+*.iml
+.project
+.settings/
+.classpath
+
+# macOS specific files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows specific files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Debug logs
+*.log

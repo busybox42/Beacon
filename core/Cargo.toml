@@ -1,0 +1,27 @@
+[package]
+name = "beacon-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libp2p = { version = "0.53", features = [
+    "tokio",
+    "gossipsub",
+    "mdns",
+    "tcp",
+    "tls",
+    "yamux",
+    "ping",
+    "identify",
+    "macros",
+]}
+tokio = { version = "1.0", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+tracing = { version = "0.1", features = ["log"] }
+tracing-subscriber = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
