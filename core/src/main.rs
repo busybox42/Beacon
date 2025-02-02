@@ -2,7 +2,7 @@ use beacon_core::{BeaconNetwork, NetworkCommand};
 use std::error::Error;
 use tokio::io::{self, AsyncBufReadExt};
 use tracing::info;
-use libp2p::{PeerId, multiaddr::Protocol};
+use libp2p::PeerId;
 use std::str::FromStr;
 
 #[tokio::main]
