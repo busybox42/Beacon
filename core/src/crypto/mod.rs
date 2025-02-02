@@ -1,104 +1,209 @@
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey, Signature};
-use x25519_dalek::{EphemeralSecret, PublicKey as X25519Public, SharedSecret};
+use std::error::Error;
+use std::fmt;
+
+use ed25519_dalek::{
+    SigningKey, 
+    VerifyingKey, 
+    Signature,
+    Signer,
+    Verifier,
+};
+use x25519_dalek::{
+    EphemeralSecret, 
+    PublicKey as X25519PublicKey, 
+    SharedSecret,
+};
 use rand::rngs::OsRng;
 use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm,
+    Aes256Gcm, 
+    Key, 
     Nonce,
+    aead::{Aead, AeadCore, KeyInit}
 };
+use serde::{Serialize, Deserialize};
 
-#[derive(thiserror::Error, Debug)]
+/// Represents a user's complete cryptographic identity
+#[derive(Clone)]
+pub struct CryptoIdentity {
+    /// Ed25519 signing key for signatures
+    ed25519_signing_key: SigningKey,
+    /// Ed25519 verifying key for signatures
+    ed25519_verifying_key: VerifyingKey,
+    /// X25519 key for key exchange (stored as bytes)
+    x25519_secret: [u8; 32],
+    /// X25519 public key for key exchange
+    x25519_public: X25519PublicKey,
+}
+
+/// Custom error type for cryptographic operations
+#[derive(Debug)]
 pub enum CryptoError {
-    #[error("Encryption failed: {0}")]
-    EncryptionError(String),
-    #[error("Decryption failed: {0}")]
-    DecryptionError(String),
-    #[error("Signature error: {0}")]
-    SignatureError(String),
+    KeyGenerationError,
+    EncryptionError,
+    DecryptionError,
+    SerializationError,
+    SignatureError,
 }
 
-pub struct CryptoManager {
-    signing_key: SigningKey,
-    public_key: X25519Public,
-}
-
-impl CryptoManager {
-    pub fn new() -> Self {
-        let mut rng = OsRng;
-        
-        // Generate Ed25519 keypair for signing
-        let signing_key = SigningKey::generate(&mut rng);
-        
-        // Generate initial X25519 key pair
-        let secret = EphemeralSecret::random_from_rng(&mut rng);
-        let public_key = X25519Public::from(&secret);
-
-        Self {
-            signing_key,
-            public_key,
+impl fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            CryptoError::KeyGenerationError => write!(f, "Failed to generate cryptographic keys"),
+            CryptoError::EncryptionError => write!(f, "Encryption failed"),
+            CryptoError::DecryptionError => write!(f, "Decryption failed"),
+            CryptoError::SerializationError => write!(f, "Serialization failed"),
+            CryptoError::SignatureError => write!(f, "Signature verification failed"),
         }
     }
+}
 
-    pub fn get_public_key(&self) -> X25519Public {
-        self.public_key
+impl Error for CryptoError {}
+
+/// Represents an encrypted message with associated metadata
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EncryptedMessage {
+    /// The encrypted payload
+    pub(crate) ciphertext: Vec<u8>,
+    /// Nonce used for encryption
+    pub(crate) nonce: Vec<u8>,
+    /// Optional signature for message authenticity
+    pub(crate) signature: Option<Vec<u8>>,
+}
+
+impl CryptoIdentity {
+    /// Create a new cryptographic identity
+    pub fn new() -> Result<Self, CryptoError> {
+        let mut csprng = OsRng;
+        
+        // Generate Ed25519 keys
+        let ed25519_signing_key = SigningKey::generate(&mut csprng);
+        let ed25519_verifying_key = ed25519_signing_key.verifying_key();
+        
+        // Generate X25519 keys for key exchange
+        let x25519_secret = EphemeralSecret::random_from_rng(&mut csprng);
+        let x25519_public = X25519PublicKey::from(&x25519_secret);
+        
+        // Generate a derived secret for storage
+        let derived_secret = x25519_secret.diffie_hellman(&x25519_public).as_bytes().clone();
+        
+        Ok(CryptoIdentity {
+            ed25519_signing_key,
+            ed25519_verifying_key,
+            x25519_secret: derived_secret,
+            x25519_public,
+        })
     }
 
-    pub fn sign_message(&self, message: &[u8]) -> Result<Signature, CryptoError> {
-        Ok(self.signing_key.sign(message))
+    /// Get the X25519 public key for key exchange
+    pub fn x25519_public_key(&self) -> X25519PublicKey {
+        self.x25519_public
     }
 
+    /// Get the Ed25519 verifying key for signatures
+    pub fn ed25519_public_key(&self) -> VerifyingKey {
+        self.ed25519_verifying_key
+    }
+
+    /// Get the stored secret bytes
+    pub fn get_secret_bytes(&self) -> &[u8; 32] {
+        &self.x25519_secret
+    }
+
+    /// Perform a key exchange with another peer's public key
+    pub fn perform_key_exchange(&self, peer_public_key: X25519PublicKey) -> SharedSecret {
+        let mut csprng = OsRng;
+        let secret = EphemeralSecret::random_from_rng(&mut csprng);
+        
+        secret.diffie_hellman(&peer_public_key)
+    }
+
+    /// Sign a message with Ed25519
+    pub fn sign_message(&self, message: &[u8]) -> Vec<u8> {
+        let signature = self.ed25519_signing_key.sign(message);
+        signature.to_bytes().to_vec()
+    }
+
+    /// Verify a signature
     pub fn verify_signature(
-        verifying_key: &VerifyingKey,
-        message: &[u8],
-        signature: &Signature,
+        public_key: &VerifyingKey, 
+        message: &[u8], 
+        signature: &[u8]
     ) -> Result<(), CryptoError> {
-        verifying_key
-            .verify_strict(message, signature)
-            .map_err(|e| CryptoError::SignatureError(e.to_string()))
+        // Convert signature to fixed-size array
+        let sig_array: [u8; 64] = signature.try_into()
+            .map_err(|_| CryptoError::SignatureError)?;
+        
+        public_key.verify(message, &Signature::from_bytes(&sig_array))
+            .map_err(|_| CryptoError::SignatureError)
     }
 
-    fn generate_shared_secret(peer_public_key: &X25519Public) -> SharedSecret {
-        let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
-        ephemeral_secret.diffie_hellman(peer_public_key)
-    }
-
+    /// Encrypt a message for a specific peer
     pub fn encrypt_message(
-        &self,
-        peer_public_key: &X25519Public,
-        message: &[u8],
-    ) -> Result<Vec<u8>, CryptoError> {
-        let shared_secret = Self::generate_shared_secret(peer_public_key);
+        &self, 
+        peer_public_key: X25519PublicKey, 
+        message: &[u8]
+    ) -> Result<EncryptedMessage, CryptoError> {
+        // Perform key exchange to get a shared secret
+        let mut csprng = OsRng;
+        let secret = EphemeralSecret::random_from_rng(&mut csprng);
+        let shared_secret = secret.diffie_hellman(&peer_public_key);
         
-        let cipher = Aes256Gcm::new_from_slice(shared_secret.as_bytes())
-            .map_err(|e| CryptoError::EncryptionError(e.to_string()))?;
+        // Derive a symmetric key from the shared secret
+        let symmetric_key = derive_symmetric_key(&shared_secret);
         
-        let nonce = Nonce::from_slice(&[0u8; 12]); // Use a proper nonce generation in production
+        // Create an AES-GCM cipher
+        let cipher = Aes256Gcm::new(&symmetric_key);
         
-        let ciphertext = cipher
-            .encrypt(nonce, message)
-            .map_err(|e| CryptoError::EncryptionError(e.to_string()))?;
+        // Generate a random nonce
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         
-        Ok(ciphertext)
+        // Encrypt the message
+        let ciphertext = cipher.encrypt(&nonce, message)
+            .map_err(|_| CryptoError::EncryptionError)?;
+        
+        // Optionally sign the message
+        let signature = Some(self.sign_message(message));
+        
+        Ok(EncryptedMessage {
+            ciphertext,
+            nonce: nonce.to_vec(),
+            signature,
+        })
     }
 
+    /// Decrypt a message from a specific peer
     pub fn decrypt_message(
-        &self,
-        peer_public_key: &X25519Public,
-        encrypted: &[u8],
+        &self, 
+        peer_public_key: X25519PublicKey, 
+        encrypted_msg: &EncryptedMessage
     ) -> Result<Vec<u8>, CryptoError> {
-        let shared_secret = Self::generate_shared_secret(peer_public_key);
+        // Perform key exchange to get a shared secret
+        let mut csprng = OsRng;
+        let secret = EphemeralSecret::random_from_rng(&mut csprng);
+        let shared_secret = secret.diffie_hellman(&peer_public_key);
         
-        let cipher = Aes256Gcm::new_from_slice(shared_secret.as_bytes())
-            .map_err(|e| CryptoError::DecryptionError(e.to_string()))?;
+        // Derive a symmetric key from the shared secret
+        let symmetric_key = derive_symmetric_key(&shared_secret);
         
-        let nonce = Nonce::from_slice(&[0u8; 12]); // Use same nonce as encryption
+        // Create an AES-GCM cipher
+        let cipher = Aes256Gcm::new(&symmetric_key);
         
-        let plaintext = cipher
-            .decrypt(nonce, encrypted)
-            .map_err(|e| CryptoError::DecryptionError(e.to_string()))?;
+        // Convert nonce to fixed-size array
+        let nonce = Nonce::from_slice(&encrypted_msg.nonce);
         
-        Ok(plaintext)
+        // Decrypt the message
+        let decrypted_message = cipher.decrypt(nonce, encrypted_msg.ciphertext.as_slice())
+            .map_err(|_| CryptoError::DecryptionError)?;
+        
+        Ok(decrypted_message)
     }
+}
+
+/// Derive a symmetric key from a shared secret
+fn derive_symmetric_key(shared_secret: &SharedSecret) -> Key<Aes256Gcm> {
+    // Use the first 32 bytes of the shared secret as the key
+    let key_material = shared_secret.as_bytes();
+    Key::<Aes256Gcm>::from_slice(&key_material[..32]).to_owned()
 }
 
 #[cfg(test)]
@@ -106,33 +211,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_encryption_decryption() {
-        let alice = CryptoManager::new();
-        let bob = CryptoManager::new();
-        
-        let message = b"Hello, Bob!";
-        
-        let encrypted = alice
-            .encrypt_message(&bob.get_public_key(), message)
+    fn test_end_to_end_encryption() {
+        // Create two identities
+        let alice_identity = CryptoIdentity::new().unwrap();
+        let bob_identity = CryptoIdentity::new().unwrap();
+
+        // Message to encrypt
+        let original_message = b"Hello, secure communication!";
+
+        // Alice encrypts a message for Bob
+        let encrypted_msg = alice_identity
+            .encrypt_message(bob_identity.x25519_public_key(), original_message)
             .unwrap();
-        
-        let decrypted = bob
-            .decrypt_message(&alice.get_public_key(), &encrypted)
+
+        // Bob decrypts the message from Alice
+        let decrypted_message = bob_identity
+            .decrypt_message(alice_identity.x25519_public_key(), &encrypted_msg)
             .unwrap();
-        
-        assert_eq!(message, &decrypted[..]);
+
+        // Verify the decrypted message matches the original
+        assert_eq!(original_message, decrypted_message.as_slice());
     }
 
     #[test]
-    fn test_signing_verification() {
-        let manager = CryptoManager::new();
-        let message = b"Hello, World!";
-        
-        let signature = manager.sign_message(message).unwrap();
-        
-        let verifying_key = manager.signing_key.verifying_key();
-        let result = CryptoManager::verify_signature(&verifying_key, message, &signature);
-        
-        assert!(result.is_ok());
+    fn test_key_exchange() {
+        let alice_identity = CryptoIdentity::new().unwrap();
+        let bob_identity = CryptoIdentity::new().unwrap();
+
+        // Perform key exchange in both directions
+        let alice_shared = alice_identity.perform_key_exchange(bob_identity.x25519_public_key());
+        let bob_shared = bob_identity.perform_key_exchange(alice_identity.x25519_public_key());
+
+        // Shared secrets should be equal
+        assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
     }
 }

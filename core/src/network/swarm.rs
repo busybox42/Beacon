@@ -8,9 +8,10 @@ use libp2p::{
     swarm::SwarmEvent,
 };
 use tokio::sync::mpsc;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 
 use crate::protocol::message::{BeaconMessage, MessageType};
+use crate::protocol::types::SystemMessageType;
 use super::behaviour::BeaconBehaviour;
 use super::behaviour::BeaconEvent;
 use super::commands::NetworkCommand;
@@ -105,6 +106,38 @@ impl BeaconNetwork {
                                             }
                                         }
                                     }
+                                    MessageType::Encrypted(_encrypted_msg) => {
+                                        warn!(
+                                            "Received encrypted message from {}. Decryption not implemented.",
+                                            beacon_message.sender
+                                        );
+                                    }
+                                    MessageType::System(system_type, content) => {
+                                        match system_type {
+                                            SystemMessageType::UserJoined => {
+                                                info!(
+                                                    "User {} joined the network. Message: {}",
+                                                    beacon_message.sender,
+                                                    content
+                                                );
+                                            }
+                                            SystemMessageType::UserLeft => {
+                                                info!(
+                                                    "User {} left the network. Message: {}",
+                                                    beacon_message.sender,
+                                                    content
+                                                );
+                                            }
+                                            _ => {
+                                                info!(
+                                                    "Received system message of type {:?} from {}. Content: {}",
+                                                    system_type,
+                                                    beacon_message.sender,
+                                                    content
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -135,6 +168,48 @@ impl BeaconNetwork {
                             let topic = gossipsub::IdentTopic::new("beacon-messages");
                             if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, encoded) {
                                 error!("Private message error: {e}");
+                            }
+                        }
+                        NetworkCommand::EncryptedPrivate { 
+                            encrypted_message, 
+                            recipient, 
+                            sender_public_key 
+                        } => {
+                            let message = BeaconMessage::new_encrypted(
+                                encrypted_message, 
+                                self.peer_id, 
+                                Some(recipient), 
+                                sender_public_key
+                            );
+                            let encoded = serde_json::to_vec(&message)?;
+                            let topic = gossipsub::IdentTopic::new("beacon-encrypted-messages");
+                            if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, encoded) {
+                                error!("Encrypted message error: {e}");
+                            }
+                        }
+                        NetworkCommand::System { message_type, content } => {
+                            let message = BeaconMessage::new_system(message_type, content, self.peer_id);
+                            let encoded = serde_json::to_vec(&message)?;
+                            let topic = gossipsub::IdentTopic::new("beacon-system-messages");
+                            if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, encoded) {
+                                error!("System message error: {e}");
+                            }
+                        }
+                        NetworkCommand::EstablishSecureConnection(peer) => {
+                            warn!("Secure connection establishment not implemented for peer: {}", peer);
+                        }
+                        NetworkCommand::UpdateStatus(status) => {
+                            info!("Updating user status to: {}", status);
+                            // You might want to broadcast a system message about status change
+                            let system_message = BeaconMessage::new_system(
+                                SystemMessageType::UserJoined, 
+                                format!("Status updated to: {}", status), 
+                                self.peer_id
+                            );
+                            let encoded = serde_json::to_vec(&system_message)?;
+                            let topic = gossipsub::IdentTopic::new("beacon-system-messages");
+                            if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, encoded) {
+                                error!("Status update error: {e}");
                             }
                         }
                     }
