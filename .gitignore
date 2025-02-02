@@ -1,5 +1,6 @@
 # Rust build directory
-/target/
+core/target/
+core/Cargo.lock
 
 # Remove Cargo.lock for libraries
 # Cargo.lock

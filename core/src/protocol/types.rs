@@ -51,14 +51,15 @@ impl PublicIdentityKeys {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SystemMessageType {
-    /// User joined the network
     UserJoined,
-    /// User left the network
     UserLeft,
-    /// Connection request
     ConnectionRequest,
-    /// Connection accepted
     ConnectionAccepted,
+    // New: Public key sharing
+    PublicKeyExchange {
+        x25519_public_key: Vec<u8>,
+        ed25519_public_key: Vec<u8>,
+    },
 }
 
 #[cfg(test)]
